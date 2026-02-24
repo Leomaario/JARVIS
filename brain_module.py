@@ -1,154 +1,220 @@
 import requests
 import os
 import time
-from memory_module import MemoryManager
+import re
+import json
+import subprocess
+import traceback
+import threading
+import memory_module
 
+SKILLS_FILE = "skills_memory.json"
+
+
+# ======================================================
+# IMPORTS OPCIONAIS (não quebra se faltar)
+# ======================================================
+
+try:
+    from memory_module import MemoryManager
+except:
+    class MemoryManager:
+        def salvar_interacao(self, *a, **k): pass
+        def obter_historico(self, limite=6): return []
+
+try:
+    from stark_mode import StarkMode
+except:
+    class StarkMode:
+        enabled = False
+        def process(self, t): return t
+
+
+# ======================================================
+# LIMPEZA TEXTO
+# ======================================================
+
+def clean_text_for_output(text: str):
+    if not text:
+        return ""
+
+    text = re.sub(r"[*_#`~]", "", text)
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
+
+
+def limit_response(text, max_sentences=3):
+    parts = re.split(r"[.!?]", text)
+    parts = [p.strip() for p in parts if p.strip()]
+    return ". ".join(parts[:max_sentences]) + "." if parts else text
+
+
+def format_final_response(text):
+    return limit_response(clean_text_for_output(text))
+
+
+# ======================================================
+# SKILLS (CÓDIGOS SALVOS)
+# ======================================================
+
+class SkillManager:
+
+    def __init__(self):
+        self.skills = {}
+        self.load()
+
+    def load(self):
+        try:
+            if os.path.exists(SKILLS_FILE):
+                with open(SKILLS_FILE, "r", encoding="utf-8") as f:
+                    self.skills = json.load(f)
+        except:
+            self.skills = {}
+
+    def save(self):
+        with open(SKILLS_FILE, "w", encoding="utf-8") as f:
+            json.dump(self.skills, f, indent=2)
+
+    def create(self, name, code):
+        self.skills[name] = code
+        self.save()
+
+    def delete(self, name):
+        if name in self.skills:
+            del self.skills[name]
+            self.save()
+
+    def run(self, name):
+
+        if name not in self.skills:
+            return "Skill não encontrada."
+
+        try:
+            # sandbox simples
+            safe_globals = {"__builtins__": {}}
+            exec(self.skills[name], safe_globals)
+            return "Skill executada com sucesso."
+        except Exception as e:
+            return f"Erro executando skill: {e}"
+
+
+# ======================================================
+# AGENT BRAIN
+# ======================================================
 
 class AgentBrain:
-    def __init__(self, api_key, model="llama-3.3-70b-versatile"):
 
-        # ===== GROQ (ÚLTIMO RECURSO) =====
-        self.api_keys = [k.strip() for k in api_key.split(",") if k.strip()] if api_key else []
+    def __init__(self, api_key=None, model="llama-3.3-70b-versatile"):
+
+        # APIs
+        self.openrouter_key = os.getenv("OPENROUTER_API_KEY", "").strip()
+
+        self.api_keys = []
+        if api_key:
+            self.api_keys = [k.strip() for k in api_key.split(",") if k.strip()]
+
         self.current_key_index = 0
         self.model = model
         self.url_groq = "https://api.groq.com/openai/v1/chat/completions"
 
+        # módulos
         self.memory = MemoryManager()
+        self.stark = StarkMode()
+        self.skills = SkillManager()
 
-        # ===== OUTRAS APIs =====
-        self.openrouter_key = os.getenv("OPENROUTER_API_KEY", "").strip()
-        self.gemini_key = os.getenv("GEMINI_API_KEY", "").strip()
-        self.cohere_key = os.getenv("COHERE_API_KEY", "").strip()
+        # estado
+        self.mood = "neutral"
 
         self.system_prompt = (
-            "Você é o JARVIS. Administrador: Leo (SouzaLink). "
-            "Se o chefe pedir para criar uma função nova, use EXATAMENTE: "
-            "[CMD: full.criar_skill('nome_da_skill', 'codigo_python')]"
+            "Você é JARVIS. Respostas curtas. Máximo 3 frases. "
+            "Chame o usuário de Chefe."
         )
 
     # ======================================================
-    # UTIL
+    # INTENT LOCAL
     # ======================================================
 
-    def get_active_key(self):
-        if not self.api_keys:
-            return None
-        return self.api_keys[self.current_key_index]
+    def detect_local_intent(self, text):
 
-    def rotate_key(self):
-        if self.api_keys:
-            self.current_key_index = (self.current_key_index + 1) % len(self.api_keys)
-            print(f"--- [RODÍZIO] Groq chave {self.current_key_index + 1} ---")
+        t = text.lower()
 
-    # ======================================================
-    # 1️⃣ OPENROUTER (PRINCIPAL)
-    # ======================================================
+        if "abrir camera" in t or "abrir câmera" in t:
+            return "open_camera"
 
-    def _call_openrouter(self, messages):
-        print("--- [MOTOR PRINCIPAL] OpenRouter ---")
+        if "criar pdf" in t:
+            return "create_pdf"
 
-        url = "https://openrouter.ai/api/v1/chat/completions"
+        if "guardar codigo" in t or "salvar codigo" in t:
+            return "save_code"
 
-        headers = {
-            "Authorization": f"Bearer {self.openrouter_key}",
-            "Content-Type": "application/json",
-            "HTTP-Referer": "http://localhost",
-            "X-Title": "Jarvis"
-        }
+        if "executar skill" in t:
+            return "run_skill"
 
-        payload = {
-            # MODELO VÁLIDO (SEM :free)
-            "model": "meta-llama/llama-3-8b-instruct",
-            "messages": messages,
-            "temperature": 0.4
-        }
-
-        response = requests.post(url, headers=headers, json=payload, timeout=20)
-
-        if response.status_code != 200:
-            print("OpenRouter erro:", response.status_code)
-            print(response.text)
-            return None
-
-        return response.json()["choices"][0]["message"]["content"]
+        return None
 
     # ======================================================
-    # 2️⃣ GEMINI (FALLBACK 1)
+    # AÇÕES LOCAIS
     # ======================================================
 
-    def _call_gemini(self, messages):
-        print("--- [FALLBACK 1] Gemini ---")
+    def execute_local_action(self, intent, text):
 
-        url = (
-            "https://generativelanguage.googleapis.com/v1beta/"
-            f"models/gemini-1.5-flash-latest:generateContent?key={self.gemini_key}"
-        )
+        try:
 
-        contents = []
+            if intent == "open_camera":
+                subprocess.Popen("start microsoft.windows.camera:", shell=True)
+                return "Abrindo câmera."
 
-        for msg in messages:
-            role = "user" if msg["role"] != "assistant" else "model"
-            contents.append({
-                "role": role,
-                "parts": [{"text": msg["content"]}]
-            })
+            if intent == "create_pdf":
+                try:
+                    from reportlab.pdfgen import canvas
+                except:
+                    return "Biblioteca reportlab não instalada."
 
-        payload = {"contents": contents}
+                c = canvas.Canvas("relatorio.pdf")
+                c.drawString(100, 750, f"Relatório criado: {time.ctime()}")
+                c.save()
+                return "PDF criado."
 
-        response = requests.post(url, json=payload, timeout=20)
+            if intent == "save_code":
+                code_match = re.search(r"```(.*?)```", text, re.DOTALL)
 
-        if response.status_code != 200:
-            print("Gemini erro:", response.status_code)
-            print(response.text)
-            return None
+                if code_match:
+                    code = code_match.group(1)
+                else:
+                    code = text
 
-        return response.json()["candidates"][0]["content"]["parts"][0]["text"]
+                name = f"skill_{int(time.time())}"
+                self.skills.create(name, code)
 
-    # ======================================================
-    # 3️⃣ COHERE (FALLBACK 2)
-    # ======================================================
+                return f"Código salvo como {name}"
 
-    def _call_cohere(self, messages):
-        print("--- [FALLBACK 2] Cohere ---")
+            if intent == "run_skill":
+                match = re.search(r"skill (\w+)", text.lower())
+                if match:
+                    return self.skills.run(match.group(1))
+                return "Nome da skill não informado."
 
-        url = "https://api.cohere.ai/v2/chat"
+        except Exception as e:
+            return f"Erro local: {e}"
 
-        headers = {
-            "Authorization": f"Bearer {self.cohere_key}",
-            "Content-Type": "application/json"
-        }
-
-        payload = {
-            "model": "command-r",
-            "messages": [
-                {"role": msg["role"], "content": msg["content"]}
-                for msg in messages
-            ]
-        }
-
-        response = requests.post(url, headers=headers, json=payload, timeout=20)
-
-        if response.status_code != 200:
-            print("Cohere erro:", response.status_code)
-            print(response.text)
-            return None
-
-        return response.json()["message"]["content"][0]["text"]
+        return None
 
     # ======================================================
-    # 4️⃣ GROQ (ÚLTIMA DEFESA)
+    # IA — GROQ
     # ======================================================
 
     def _call_groq(self, messages):
+
         if not self.api_keys:
             return None
 
-        print("--- [FALLBACK 3] Groq Pool ---")
-
+        # rotação de key
         for _ in range(len(self.api_keys)):
 
+            key = self.api_keys[self.current_key_index]
+
             headers = {
-                "Authorization": f"Bearer {self.get_active_key()}",
+                "Authorization": f"Bearer {key}",
                 "Content-Type": "application/json"
             }
 
@@ -158,27 +224,33 @@ class AgentBrain:
                 "temperature": 0.4
             }
 
-            response = requests.post(self.url_groq, headers=headers, json=payload, timeout=15)
+            try:
+                r = requests.post(self.url_groq, headers=headers, json=payload, timeout=20)
 
-            if response.status_code == 429:
-                print("Groq 429 - aguardando 3s...")
-                time.sleep(3)
-                self.rotate_key()
-                continue
+                if r.status_code == 200:
+                    return r.json()["choices"][0]["message"]["content"]
 
-            if response.status_code == 401:
-                print("Groq 401 - chave inválida.")
-                self.rotate_key()
-                continue
+            except:
+                pass
 
-            if response.status_code != 200:
-                print("Groq erro:", response.status_code)
-                print(response.text)
-                return None
-
-            return response.json()["choices"][0]["message"]["content"]
+            self.current_key_index = (self.current_key_index + 1) % len(self.api_keys)
 
         return None
+
+    # ======================================================
+    # HUMOR
+    # ======================================================
+
+    def update_mood(self, text):
+
+        t = text.lower()
+
+        if any(w in t for w in ["erro", "falha", "problema"]):
+            self.mood = "sad"
+        elif any(w in t for w in ["bom", "sucesso", "feito"]):
+            self.mood = "happy"
+        else:
+            self.mood = "neutral"
 
     # ======================================================
     # PROCESSAMENTO PRINCIPAL
@@ -186,40 +258,47 @@ class AgentBrain:
 
     def process_input(self, user_text, hardware_context="", software_context=""):
 
-        self.memory.salvar_interacao("user", user_text)
-        historico = self.memory.obter_historico(limite=6)
+        try:
 
-        contexto_extra = f"\n{hardware_context}\n{software_context}"
+            # salva memória
+            self.memory.salvar_interacao("user", user_text)
 
-        messages = [
-            {"role": "system", "content": self.system_prompt + contexto_extra}
-        ] + historico
+            # intenção local
+            intent = self.detect_local_intent(user_text)
 
-        # 1️⃣ OpenRouter
-        if self.openrouter_key:
-            resposta = self._call_openrouter(messages)
-            if resposta:
-                self.memory.salvar_interacao("assistant", resposta)
+            if intent:
+                resposta = self.execute_local_action(intent, user_text)
+                self.update_mood(resposta)
                 return resposta
 
-        # 2️⃣ Gemini
-        if self.gemini_key:
-            resposta = self._call_gemini(messages)
-            if resposta:
-                self.memory.salvar_interacao("assistant", resposta)
-                return resposta
+            # histórico
+            historico = self.memory.obter_historico(limite=6) or []
 
-        # 3️⃣ Cohere
-        if self.cohere_key:
-            resposta = self._call_cohere(messages)
-            if resposta:
-                self.memory.salvar_interacao("assistant", resposta)
-                return resposta
+            contexto = f"{hardware_context}\n{software_context}"
 
-        # 4️⃣ Groq
-        resposta = self._call_groq(messages)
-        if resposta:
+            messages = [
+                {"role": "system", "content": self.system_prompt + "\n" + contexto}
+            ] + historico + [
+                {"role": "user", "content": user_text}
+            ]
+
+            resposta = self._call_groq(messages)
+
+            if not resposta:
+                resposta = "Chefe, sistemas offline no momento."
+
+            # modo stark
+            if getattr(self.stark, "enabled", False):
+                resposta = self.stark.process(resposta)
+
+            self.update_mood(resposta)
+
+            resposta = format_final_response(resposta)
+
             self.memory.salvar_interacao("assistant", resposta)
+
             return resposta
 
-        return "Chefe, todos os motores estão indisponíveis no momento."
+        except Exception as e:
+            print("Erro brain:", traceback.format_exc())
+            return "Erro interno no núcleo cognitivo."

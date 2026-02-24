@@ -3,238 +3,346 @@ import customtkinter as ctk
 import math
 import time
 import threading
-
+import random
+import psutil
+import cv2
 from PIL import Image, ImageTk
 import mss
 import numpy as np
-import cv2
-import pyautogui
+
+ctk.set_appearance_mode("dark")
+
+BG = "#020308"
+PRIMARY = "#00F0FF"
+ACCENT = "#00FFD0"
+PANEL = "#060B18"
+TEXT = "#9FEFFF"
+WARNING = "#FF3B3B"
 
 
 class HologramAgentGUI(ctk.CTk):
 
-    def __init__(self, on_send_callback,
-                 on_voice_callback,
-                 on_file_callback,
-                 on_vision_callback=None):
-
+    def __init__(self, on_send_callback, on_voice_callback, on_file_callback, on_vision_callback=None):
         super().__init__()
 
-        # =============================
-        # CONFIG BASE
-        # =============================
+        self.title("JARVIS — STARK SUPREME")
+        self.geometry("1400x900")
+        self.configure(fg_color=BG)
 
-        self.title("JARVIS OS - SouzaLink Terminal")
-        self.geometry("1000x950")
-        self.configure(fg_color="#000000")
-        ctk.set_appearance_mode("dark")
-
+        # callbacks
         self.on_send_callback = on_send_callback
         self.on_voice_callback = on_voice_callback
         self.on_file_callback = on_file_callback
         self.on_vision_toggle = on_vision_callback
 
+        # estados internos
+        self.angle = 0
+        self.pulse = 0
+        self.voice_energy = 5
+        self.mood = "neutral"
+
+        # ⚠️ NUNCA usar self.state (bug do tkinter)
+        self.agent_state = "idle"
+
         self.screen_running = False
         self.preview_ref = None
-        self.intelligent_mode = True
+        self.cap = None
 
-        self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure(0, weight=2)
+        self.setup_layout()
+        self.start_animations()
+        self.iniciar_monitor_sistema()
+        self.start_webcam()
+
+    # =====================================================
+    # LAYOUT
+    # =====================================================
+
+    def setup_layout(self):
+
+        self.grid_columnconfigure((0, 1, 2), weight=1)
+        self.grid_rowconfigure(0, weight=3)
         self.grid_rowconfigure(1, weight=1)
-        self.grid_rowconfigure(2, weight=0)
-        self.grid_rowconfigure(3, weight=0)
 
-        # =============================
-        # 🔵 HOLOGRAMA
-        # =============================
+        self.canvas = tk.Canvas(self, bg=BG, highlightthickness=0)
+        self.canvas.grid(row=0, column=0, columnspan=3, sticky="nsew")
 
-        self.canvas = tk.Canvas(self, bg="#000000", highlightthickness=0)
-        self.canvas.grid(row=0, column=0, sticky="nsew", pady=20)
-
-        self.angle = 0
-        self.pulse_val = 0
-
-        # =============================
-        # 👁️ MONITOR VISÃO
-        # =============================
-
-        self.monitor_frame = ctk.CTkFrame(
+        # painel sistema
+        self.sys_panel = ctk.CTkFrame(
             self,
-            fg_color="#050505",
-            border_color="#00ffff",
-            border_width=1
+            fg_color=PANEL,
+            border_color=PRIMARY,
+            border_width=1,
+            corner_radius=20
         )
-        self.monitor_frame.grid(row=1, column=0, padx=80, pady=10, sticky="nsew")
+        self.sys_panel.grid(row=1, column=0, padx=20, pady=10, sticky="nsew")
 
-        self.monitor_label = ctk.CTkLabel(
-            self.monitor_frame,
-            text="VISÃO DO SISTEMA: DESATIVADA",
-            font=("Consolas", 11, "bold"),
-            text_color="#00ffff"
-        )
-        self.monitor_label.pack(side="top", pady=5)
+        self.cpu_bar = ctk.CTkProgressBar(self.sys_panel)
+        self.cpu_bar.pack(fill="x", padx=10, pady=5)
 
-        self.preview_canvas = tk.Canvas(
-            self.monitor_frame,
-            bg="#000000",
-            height=250,
-            highlightthickness=0
-        )
-        self.preview_canvas.pack(fill="both", expand=True, padx=10, pady=5)
+        self.ram_bar = ctk.CTkProgressBar(self.sys_panel)
+        self.ram_bar.pack(fill="x", padx=10, pady=5)
 
-        self.toggle_button = ctk.CTkButton(
-            self.monitor_frame,
-            text="ATIVAR VISÃO",
-            command=self.toggle_visao
-        )
-        self.toggle_button.pack(pady=5)
-
-        # =============================
-        # 💬 CHAT
-        # =============================
-
+        # terminal
         self.chat_display = ctk.CTkTextbox(
             self,
-            height=80,
-            font=("Consolas", 14),
-            fg_color="#000000",
-            text_color="#00ffff"
+            font=("Consolas", 13),
+            fg_color="#010203",
+            text_color=TEXT,
+            border_color=PRIMARY,
+            border_width=1
         )
-        self.chat_display.grid(row=2, column=0, padx=80, pady=(0, 10), sticky="ew")
+        self.chat_display.grid(row=1, column=1, sticky="nsew", padx=10, pady=10)
         self.chat_display.configure(state="disabled")
 
-        # =============================
-        # INPUT
-        # =============================
-
+        # input
         self.input_frame = ctk.CTkFrame(self, fg_color="transparent")
-        self.input_frame.grid(row=3, column=0, padx=80, pady=(0, 40), sticky="ew")
-        self.input_frame.grid_columnconfigure(0, weight=1)
+        self.input_frame.grid(row=1, column=2, sticky="nsew")
 
-        self.user_input = ctk.CTkEntry(
-            self.input_frame,
-            height=45,
-            placeholder_text="Comando para o JARVIS..."
-        )
-        self.user_input.grid(row=0, column=0, padx=(0, 10), sticky="ew")
+        self.user_input = ctk.CTkEntry(self.input_frame, placeholder_text="Comando...")
+        self.user_input.pack(pady=10, padx=20, fill="x")
         self.user_input.bind("<Return>", lambda e: self.send_message())
 
-        ctk.CTkButton(
-            self.input_frame,
-            text="ENVIAR",
-            command=self.send_message
-        ).grid(row=0, column=1)
+        ctk.CTkButton(self.input_frame, text="ENVIAR", command=self.send_message).pack(pady=5)
+        ctk.CTkButton(self.input_frame, text="🎤 VOZ", command=self.activate_listening).pack(pady=5)
+        ctk.CTkButton(self.input_frame, text="VISÃO", command=self.toggle_visao).pack(pady=5)
 
-        ctk.CTkButton(
-            self.input_frame,
-            text="🎤",
-            command=self.on_voice_callback
-        ).grid(row=0, column=2)
+    # =====================================================
+    # MONITOR CPU / RAM
+    # =====================================================
 
-        self.draw_hologram()
+    def iniciar_monitor_sistema(self):
 
-    # ==========================================================
-    # 👁️ VISÃO INTELIGENTE
-    # ==========================================================
+        def update():
+            try:
+                cpu = psutil.cpu_percent() / 100
+                ram = psutil.virtual_memory().percent / 100
+
+                self.cpu_bar.set(cpu)
+                self.ram_bar.set(ram)
+
+            except Exception as e:
+                print("Erro monitor sistema:", e)
+
+            self.after(1000, update)
+
+        update()
+
+    # =====================================================
+    # ANIMAÇÕES
+    # =====================================================
+
+    def start_animations(self):
+        self.animate_grid()
+        self.animate_hologram()
+        self.animate_particles()
+        self.animate_voice_wave()
+        self.animate_state_indicator()
+
+    def animate_grid(self):
+        self.canvas.delete("grid")
+
+        w = self.canvas.winfo_width()
+        h = self.canvas.winfo_height()
+
+        for x in range(0, int(w), 60):
+            self.canvas.create_line(x, 0, x, h, fill="#031420", tags="grid")
+
+        for y in range(0, int(h), 60):
+            self.canvas.create_line(0, y, w, y, fill="#031420", tags="grid")
+
+        self.after(300, self.animate_grid)
+
+    def animate_hologram(self):
+
+        self.canvas.delete("holo")
+
+        w = self.canvas.winfo_width()
+        h = self.canvas.winfo_height()
+        cx, cy = w / 2, h / 2
+
+        self.angle += 1
+        self.pulse += 0.08
+
+        r = 130 + math.sin(self.pulse) * 10
+
+        color = {
+            "happy": ACCENT,
+            "sad": WARNING,
+            "neutral": PRIMARY
+        }[self.mood]
+
+        for i in range(4):
+            size = r + i * 25
+            self.canvas.create_oval(
+                cx-size, cy-size, cx+size, cy+size,
+                outline=color, width=1, tags="holo"
+            )
+
+        rad = math.radians(self.angle)
+        x = cx + r * math.cos(rad)
+        y = cy + r * math.sin(rad)
+
+        self.canvas.create_line(cx, cy, x, y, fill=color, width=2, tags="holo")
+
+        energy = 15 + math.sin(self.pulse) * 6
+        self.canvas.create_oval(
+            cx-energy, cy-energy, cx+energy, cy+energy,
+            fill=color, outline="", tags="holo"
+        )
+
+        if self.agent_state == "thinking":
+            self.canvas.create_rectangle(
+                0, cy-5, w, cy+5,
+                fill=color, stipple="gray25", tags="holo"
+            )
+
+        self.after(30, self.animate_hologram)
+
+    def animate_particles(self):
+
+        w = self.canvas.winfo_width()
+        h = self.canvas.winfo_height()
+
+        for _ in range(6):
+            x = random.randint(0, int(w))
+            y = random.randint(0, int(h))
+            self.canvas.create_oval(x, y, x+2, y+2, fill=PRIMARY, tags="particle")
+
+        self.canvas.after(800, lambda: self.canvas.delete("particle"))
+        self.after(400, self.animate_particles)
+
+    def animate_voice_wave(self):
+
+        self.canvas.delete("wave")
+
+        w = self.canvas.winfo_width()
+        h = self.canvas.winfo_height()
+        base_y = h - 100
+
+        for x in range(0, int(w), 10):
+            height = random.randint(5, 20 + self.voice_energy)
+            self.canvas.create_line(
+                x, base_y-height, x, base_y+height,
+                fill=ACCENT, tags="wave"
+            )
+
+        self.after(80, self.animate_voice_wave)
+
+    def animate_state_indicator(self):
+
+        self.canvas.delete("state")
+        w = self.canvas.winfo_width()
+
+        color = {
+            "idle": TEXT,
+            "listening": "yellow",
+            "thinking": PRIMARY,
+            "speaking": ACCENT
+        }[self.agent_state]
+
+        self.canvas.create_text(
+            w-120, 40,
+            text=self.agent_state.upper(),
+            fill=color,
+            font=("Consolas", 14),
+            tags="state"
+        )
+
+        self.after(200, self.animate_state_indicator)
+
+    # =====================================================
+    # WEBCAM
+    # =====================================================
+
+    def start_webcam(self):
+
+        self.cap = cv2.VideoCapture(0)
+
+        def loop():
+            if self.cap and self.cap.isOpened():
+                ret, frame = self.cap.read()
+
+                if ret:
+                    frame = cv2.resize(frame, (200, 140))
+                    frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
+                    img = ImageTk.PhotoImage(Image.fromarray(frame))
+                    self.preview_ref = img
+
+                    self.canvas.delete("webcam")
+                    self.canvas.create_image(140, 90, image=img, tags="webcam")
+
+            self.after(30, loop)
+
+        loop()
+
+    # =====================================================
+    # SCREEN CAPTURE
+    # =====================================================
 
     def toggle_visao(self):
-        if not self.screen_running:
-            self.screen_running = True
-            self.monitor_label.configure(text="VISÃO DO SISTEMA: ATIVA")
-            self.toggle_button.configure(text="DESATIVAR VISÃO")
-            threading.Thread(target=self._capturar_tela_loop, daemon=True).start()
-        else:
-            self.screen_running = False
-            self.monitor_label.configure(text="VISÃO DO SISTEMA: DESATIVADA")
-            self.toggle_button.configure(text="ATIVAR VISÃO")
-            self.preview_canvas.delete("all")
 
-    def _capturar_tela_loop(self):
+        self.screen_running = not self.screen_running
+
+        if self.screen_running:
+            threading.Thread(target=self.capture_loop, daemon=True).start()
+
+    def capture_loop(self):
+
         with mss.mss() as sct:
             monitor = sct.monitors[1]
 
             while self.screen_running:
-                screenshot = sct.grab(monitor)
-                img = np.array(screenshot)
+                img = np.array(sct.grab(monitor))
+                frame = cv2.cvtColor(img, cv2.COLOR_BGRA2RGB)
+                frame = cv2.resize(frame, (320, 180))
 
-                frame = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
+                tk_img = ImageTk.PhotoImage(Image.fromarray(frame))
+                self.after(0, lambda im=tk_img: self.show_screen(im))
 
-                # 🎯 Marca posição do mouse
-                mouse_x, mouse_y = pyautogui.position()
-                cv2.circle(frame, (mouse_x, mouse_y), 15, (0, 255, 255), 3)
+                time.sleep(0.05)
 
-                # 🧠 Detecta bordas (elementos)
-                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                edges = cv2.Canny(gray, 100, 200)
-                contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    def show_screen(self, img):
+        self.preview_ref = img
+        self.canvas.delete("screen")
+        self.canvas.create_image(250, 150, image=img, tags="screen")
 
-                for cnt in contours[:25]:
-                    x, y, w, h = cv2.boundingRect(cnt)
-                    if w > 60 and h > 40:
-                        cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
-
-                # Redimensiona preview
-                frame = cv2.resize(frame, (600, 250))
-                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-
-                img_pil = Image.fromarray(frame)
-                self.preview_ref = ImageTk.PhotoImage(img_pil)
-
-                self.preview_canvas.after(
-                    0,
-                    lambda: self.preview_canvas.create_image(
-                        300, 125,
-                        image=self.preview_ref
-                    )
-                )
-
-                time.sleep(0.03)
-
-    # ==========================================================
-    # 🔵 HOLOGRAMA
-    # ==========================================================
-
-    def draw_hologram(self):
-        self.canvas.delete("energy")
-
-        width = self.canvas.winfo_width()
-        height = self.canvas.winfo_height()
-
-        if width > 1:
-            cx, cy = width / 2, height / 2
-            self.pulse_val += 0.1
-            radius = 110 + (math.sin(self.pulse_val) * 4)
-
-            for i in range(0, 360, 15):
-                rad = math.radians(i + self.angle)
-                x = cx + (radius + 25) * math.cos(rad)
-                y = cy + (radius + 25) * math.sin(rad)
-
-                self.canvas.create_oval(
-                    x - 1, y - 1,
-                    x + 1, y + 1,
-                    fill="#00ffff",
-                    outline="",
-                    tags="energy"
-                )
-
-            self.angle += 0.6
-
-        self.after(30, self.draw_hologram)
-
-    # ==========================================================
-    # 💬 CHAT
-    # ==========================================================
-
-    def send_message(self):
-        msg = self.user_input.get()
-        if msg.strip():
-            self.display_message("VOCÊ", msg)
-            self.user_input.delete(0, tk.END)
-            self.on_send_callback(msg)
+    # =====================================================
+    # CHAT
+    # =====================================================
 
     def display_message(self, sender, message):
         self.chat_display.configure(state="normal")
-        self.chat_display.delete("0.0", tk.END)
-        self.chat_display.insert(tk.END, f"> {sender.upper()}: {message}")
+        t = time.strftime("%H:%M:%S")
+        self.chat_display.insert(tk.END, f"\n[{t}] {sender}: {message}")
+        self.chat_display.see(tk.END)
         self.chat_display.configure(state="disabled")
+
+    def send_message(self):
+
+        msg = self.user_input.get()
+
+        if msg.strip():
+            self.display_message("VOCÊ", msg)
+            self.user_input.delete(0, tk.END)
+
+            self.set_state("thinking")
+            self.after(500, lambda: self.set_state("speaking"))
+
+            self.on_send_callback(msg)
+
+    # =====================================================
+    # ESTADOS
+    # =====================================================
+
+    def activate_listening(self):
+        self.set_state("listening")
+        self.voice_energy = 40
+        self.on_voice_callback()
+
+    def set_state(self, state):
+        self.agent_state = state
+        self.voice_energy = 30 if state == "speaking" else 5
+
+    def set_mood(self, mood):
+        self.mood = mood
