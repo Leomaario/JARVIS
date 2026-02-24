@@ -1,5 +1,5 @@
 import re
-from skill_executor import executar_skill
+from core.skill_executor import executar_skill
 
 
 def parse_and_execute(text):

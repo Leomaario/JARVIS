@@ -6,7 +6,7 @@ import json
 import subprocess
 import traceback
 import threading
-import memory_module
+import memory.memory_module as memory_module
 
 SKILLS_FILE = "skills_memory.json"
 
@@ -16,14 +16,14 @@ SKILLS_FILE = "skills_memory.json"
 # ======================================================
 
 try:
-    from memory_module import MemoryManager
+    from memory.memory_module import MemoryManager
 except:
     class MemoryManager:
         def salvar_interacao(self, *a, **k): pass
         def obter_historico(self, limite=6): return []
 
 try:
-    from stark_mode import StarkMode
+    from core.stark_mode import StarkMode
 except:
     class StarkMode:
         enabled = False

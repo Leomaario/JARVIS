@@ -9,7 +9,7 @@ import ast
 import pygetwindow as gw
 
 from screeninfo import get_monitors
-from fullacessos import FullAccess
+from services.fullacessos import FullAccess
 from reportlab.pdfgen import canvas
 
 

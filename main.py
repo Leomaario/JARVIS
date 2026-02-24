@@ -6,18 +6,20 @@ import threading
 from dotenv import load_dotenv
 
 # módulos do sistema
-from gui_module import HologramAgentGUI
-from voice_module import VoiceAssistant
-from brain_module import AgentBrain
-from system_module import SystemController
-from vision_module import VisionEngine
+#corrigindo os imports para refletir a estrutura de pastas
+
+from gui.gui_module import HologramAgentGUI
+from services.voice_module import VoiceAssistant
+from core.brain_module import AgentBrain
+from services.system_module import SystemController
+from services.vision_module import VisionEngine
 
 
 # ============================================================
 # CONFIG
 # ============================================================
 
-load_dotenv()
+load_dotenv("config.env")
 
 CHAVES_API = os.getenv("GROQ_API_KEYS")
 
